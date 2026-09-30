@@ -462,19 +462,17 @@ async def archive_message(
         "from"
     )
 
-    # --------------------------------------------------------
-    # VERY IMPORTANT:
-    #
-    # Copy the actual message first.
-    # No local file is created.
-    # Telegram stores the copied media.
-    # --------------------------------------------------------
+    # New messages are only cached in RAM. They are not sent
+    # to the admin. Edits are copied; this keeps the archive
+    # focused on changes/deletions.
+    copied_message_id = None
 
-    copied_message_id = (
-        await copy_original(
-            message
+    if event_type != "new":
+        copied_message_id = (
+            await copy_original(
+                message
+            )
         )
-    )
 
     # --------------------------------------------------------
     # Keep metadata in RAM.
@@ -583,8 +581,9 @@ async def archive_message(
     # --------------------------------------------------------
 
     if event_type == "new":
-
-        prefix = "📥 НОВОЕ"
+        # Intentionally silent: the message is cached above
+        # so a later edit/delete/reply can refer to it.
+        return
 
     elif event_type == "edit":
 
@@ -838,6 +837,108 @@ async def process_business_connection(
 # NORMAL BOT MESSAGE
 # ============================================================
 
+async def process_reply_target(
+    message: dict,
+    source_type: str,
+) -> None:
+    """
+    If an incoming message is a reply, Telegram may include the
+    replied-to Message object in reply_to_message. For ephemeral
+    messages the Bot API also exposes ephemeral_message_id.
+
+    We do not try to reconstruct an already destroyed message by
+    guessing IDs. We copy the actual reply target while Telegram
+    still exposes it in the update.
+    """
+    target = message.get("reply_to_message")
+
+    if not isinstance(target, dict):
+        return
+
+    target = dict(target)
+
+    if message.get("business_connection_id") and not target.get(
+        "business_connection_id"
+    ):
+        target["business_connection_id"] = message.get(
+            "business_connection_id"
+        )
+
+    ephemeral_id = target.get("ephemeral_message_id")
+    if ephemeral_id is None:
+        ephemeral_id = message.get("reply_to_message", {}).get(
+            "ephemeral_message_id"
+        )
+
+    target_type = media_type(target)
+    if target_type == "text" and not message_text(target):
+        return
+
+    copied_id = await copy_original(target)
+
+    event = {
+        "type": "ephemeral_reply" if ephemeral_id is not None else "reply_target",
+        "time": now(),
+        "chat": chat_title(get_chat(message)),
+        "chat_id": get_chat(message).get("id"),
+        "message_id": target.get("message_id"),
+        "ephemeral_message_id": ephemeral_id,
+        "sender": sender_name(target.get("from")),
+        "text": message_text(target),
+        "media": target_type,
+        "source": source_type,
+        "copied_message_id": copied_id,
+    }
+
+    async with event_lock:
+        events_memory.append(event)
+
+        key = message_key(target, source_type)
+        known_messages[key] = {
+            "source_type": source_type,
+            "business_connection_id": target.get("business_connection_id"),
+            "chat_id": get_chat(target).get("id"),
+            "chat_title": chat_title(get_chat(target)),
+            "message_id": target.get("message_id"),
+            "sender": sender_name(target.get("from")),
+            "sender_id": (
+                target.get("from", {}).get("id")
+                if target.get("from")
+                else None
+            ),
+            "date": target.get("date"),
+            "text": message_text(target),
+            "media_type": target_type,
+            "ephemeral_message_id": ephemeral_id,
+            "copied_message_id": copied_id,
+            "saved_at": now(),
+        }
+
+    prefix = (
+        "⏱ ЭФЕМЕРНОЕ СООБЩЕНИЕ ПО REPLY"
+        if ephemeral_id is not None
+        else "↩️ REPLY НА СООБЩЕНИЕ"
+    )
+
+    notification = (
+        f"{prefix}\n\n"
+        f"Чат: {chat_title(get_chat(message))}\n"
+        f"Message ID: {target.get('message_id')}\n"
+        f"Ephemeral ID: {ephemeral_id or 'нет'}\n"
+        f"Тип: {target_type}"
+    )
+
+    if copied_id:
+        notification += "\n\n💾 Содержимое скопировано выше."
+    else:
+        notification += (
+            "\n\n⚠️ Telegram передал reply, но copyMessage "
+            "не смог получить исходное содержимое."
+        )
+
+    await admin_text(notification)
+
+
 async def process_normal_message(
     message: dict,
     source_type: str,
@@ -925,9 +1026,8 @@ async def make_summary(
 
 1. Удалено
 2. Изменено
-3. Новые сообщения
-4. Медиа
-5. Главное
+3. Медиа
+4. Главное
 
 Не придумывай факты.
 Если информации недостаточно,
@@ -1214,6 +1314,11 @@ async def process_update(
 
     if business_message:
 
+        await process_reply_target(
+            business_message,
+            "business",
+        )
+
         await process_normal_message(
             business_message,
             "business",
@@ -1231,6 +1336,11 @@ async def process_update(
     )
 
     if edited_business_message:
+
+        await process_reply_target(
+            edited_business_message,
+            "business",
+        )
 
         await process_normal_message(
             edited_business_message,
@@ -1268,6 +1378,11 @@ async def process_update(
 
     if channel_post:
 
+        await process_reply_target(
+            channel_post,
+            "channel",
+        )
+
         await process_normal_message(
             channel_post,
             "channel",
@@ -1285,6 +1400,11 @@ async def process_update(
     )
 
     if edited_channel_post:
+
+        await process_reply_target(
+            edited_channel_post,
+            "channel",
+        )
 
         await process_normal_message(
             edited_channel_post,
@@ -1304,6 +1424,11 @@ async def process_update(
 
     if normal_message:
 
+        await process_reply_target(
+            normal_message,
+            "normal",
+        )
+
         await process_normal_message(
             normal_message,
             "normal",
@@ -1321,6 +1446,11 @@ async def process_update(
     )
 
     if edited_message:
+
+        await process_reply_target(
+            edited_message,
+            "normal",
+        )
 
         await process_normal_message(
             edited_message,
