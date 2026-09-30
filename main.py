@@ -1332,6 +1332,16 @@ async def process_update(
 
 
 # ============================================================
+# FASTAPI APP
+# ============================================================
+
+# The app must exist before route decorators are evaluated.
+app = FastAPI(
+    title="Telegram Archive",
+)
+
+
+# ============================================================
 # WEBHOOK
 # ============================================================
 
@@ -1498,7 +1508,6 @@ async def lifespan(
     )
 
 
-app = FastAPI(
-    title="Telegram Archive",
-    lifespan=lifespan,
-)
+# Attach the lifespan after the route declarations.
+# This keeps the FastAPI app defined before @app.post/@app.get decorators.
+app.router.lifespan_context = lifespan
