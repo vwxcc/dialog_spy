@@ -1,0 +1,27 @@
+services:
+  - type: web
+    name: telegram-archive
+    runtime: python
+    plan: free
+
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn main:app --host 0.0.0.0 --port $PORT
+
+    envVars:
+      - key: BOT_TOKEN
+        sync: false
+
+      - key: ADMIN_CHAT_ID
+        sync: false
+
+      - key: MISTRAL_API_KEY
+        sync: false
+
+      - key: MISTRAL_MODEL
+        value: mistral-small-latest
+
+      - key: MISTRAL_BASE_URL
+        value: https://api.mistral.ai/v1
+
+      - key: MAX_EVENTS
+        value: "2000"
